@@ -24,7 +24,16 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-python link_extract.py <blogspot_profile_url>
+python link_extract.py -p <blogspot_profile_url> [--sleep SECONDS]
+```
+
+- `-p`, `--profile-url` (required): The Blogspot profile URL to extract links from.
+- `--sleep` (optional): Seconds to sleep between requests (default: 0.25).
+
+### Example
+
+```bash
+python link_extract.py -p https://example.blogspot.com/profile/12345 --sleep 0.5
 ```
 
 ## Output
