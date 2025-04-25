@@ -2,10 +2,11 @@
 
 '''Python script to extract blog links from a blogspot profile.'''
 
-import requests
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 import sys
-from time import sleep
+import requests
 import re
 import argparse
 
@@ -41,43 +42,81 @@ class RedirectResolver:
     WINDOW_LOCATION_REGEX = re.compile(r'window\.location\s*=\s*["\"]([^"\"]+)["\"]')
 
     @staticmethod
-    def resolve(url):
+    async def resolve(session, url):
         """
-        Get the window.location value from the page (redirect URL).
+        Asynchronously get the window.location value from the page (redirect URL).
+        :param session: aiohttp ClientSession
         :param url: The url to get the redirect from
         :return: The redirect url
         """
-        response = requests.get(url)
-        soup = BeautifulSoup(response.content, 'html.parser')
-        script = soup.find('script', string=lambda s: s and 'window.location' in s)
-        if script:
-            match = RedirectResolver.WINDOW_LOCATION_REGEX.search(script.string)
-            if match:
-                return match.group(1)
+        try:
+            async with session.get(url) as response:
+                content = await response.text()
+                soup = BeautifulSoup(content, 'html.parser')
+                script = soup.find('script', string=lambda s: s and 'window.location' in s)
+                if script:
+                    match = RedirectResolver.WINDOW_LOCATION_REGEX.search(script.string)
+                    if match:
+                        return match.group(1)
+        except Exception as e:
+            print(f"Error fetching {url}: {e}", file=sys.stderr)
         return None
 
-if __name__ == '__main__':
+async def main():
     parser = argparse.ArgumentParser(description="Extract and follow blog links from a Blogspot profile.")
     parser.add_argument("-p", "--profile-url", required=True, help="The URL of the Blogspot profile to extract links from.")
     parser.add_argument("--sleep", type=float, default=0.25, dest="sleep_seconds",
                         help="Seconds to sleep between requests (default: 0.25)")
+    parser.add_argument("-c","--concurrency", type=int, default=10, dest="concurrency",
+                        help="Maximum number of concurrent requests (default: 10)")
     args = parser.parse_args()
 
     profile_url = args.profile_url
     sleep_seconds = args.sleep_seconds
+    concurrency = args.concurrency
 
-    # Create a BlogspotProfile instance and fetch blog links
     profile = BlogspotProfile(profile_url)
     links = profile.fetch_blog_links()
-
     unique_links = set()
-    for link in links:
-        redirect_link = RedirectResolver.resolve(link)
-        print(f"{link} -> {redirect_link}")
-        if redirect_link:
-            unique_links.add(redirect_link)
-        sleep(sleep_seconds)
+
+    # Use a semaphore to limit concurrent requests
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def resolve_with_semaphore(session, link):
+        async with semaphore:
+            result = await RedirectResolver.resolve(session, link)
+            return link, result
+
+    async with aiohttp.ClientSession() as session:
+        queue = asyncio.Queue()
+        unique_links = set()
+
+        async def producer():
+            for i, link in enumerate(links):
+                if i > 0:
+                    await asyncio.sleep(sleep_seconds)
+                asyncio.create_task(consumer_task(link))
+
+        async def consumer_task(link):
+            result = await RedirectResolver.resolve(session, link)
+            await queue.put((link, result))
+
+        async def consumer():
+            completed = 0
+            total = len(links)
+            while completed < total:
+                link, redirect_link = await queue.get()
+                print(f"{link} -> {redirect_link}")
+                sys.stdout.flush()
+                if redirect_link:
+                    unique_links.add(redirect_link)
+                completed += 1
+
+        await asyncio.gather(producer(), consumer())
 
     print("\nUnique Redirecting Links:")
     for link in unique_links:
         print(link)
+
+if __name__ == '__main__':
+    asyncio.run(main())
